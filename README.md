@@ -3,7 +3,7 @@
 ## Overview
 This project builds a production-style network on AWS using Infrastructure as Code (CloudFormation). A custom VPC is split into public and private subnets across two Availability Zones, and a web server in a public subnet serves a live website.
 
-**Live Link:** http://CHANGE-THIS-TO-YOUR-WEBSITEURL
+**Live Link:** http://ec2-3-107-188-195.ap-southeast-2.compute.amazonaws.com/
 
 ## Architecture
 
@@ -59,4 +59,4 @@ See the `screenshots` section of this repository for the VPC resource map, subne
 - Deploying repeatable infrastructure with CloudFormation
 
 ## Author
-CHANGE THIS: Your Name | Your Student ID
+Shyam Shah 
