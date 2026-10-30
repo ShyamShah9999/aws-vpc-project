@@ -1,0 +1,278 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Custom VPC project - 2 public subnets, 2 private subnets across 2 AZs,
+  Internet Gateway, optional NAT Gateway, route tables, security groups,
+  S3 gateway endpoint, and a public Apache web server (live website).
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: my-vpc-project
+  VpcCidr:
+    Type: String
+    Default: 10.0.0.0/16
+  InstanceType:
+    Type: String
+    Default: t3.micro
+  EnableNatGateway:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: NAT Gateway costs money (~$0.045/hr). Set true only for demo/screenshots, then delete the stack.
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+
+Conditions:
+  CreateNat: !Equals [!Ref EnableNatGateway, 'true']
+
+Resources:
+  # ---------------- VPC ----------------
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - { Key: Name, Value: !Sub '${ProjectName}-vpc' }
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - { Key: Name, Value: !Sub '${ProjectName}-igw' }
+
+  AttachIGW:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # ---------------- Subnets ----------------
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - { Key: Name, Value: !Sub '${ProjectName}-public-1' }
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      MapPublicIpOnLaunch: true
+      Tags:
+        - { Key: Name, Value: !Sub '${ProjectName}-public-2' }
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.11.0/24
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - { Key: Name, Value: !Sub '${ProjectName}-private-1' }
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.12.0/24
+      AvailabilityZone: !Select [1, !GetAZs '']
+      Tags:
+        - { Key: Name, Value: !Sub '${ProjectName}-private-2' }
+
+  # ---------------- Routing ----------------
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - { Key: Name, Value: !Sub '${ProjectName}-public-rt' }
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachIGW
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicRtAssoc1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicRtAssoc2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - { Key: Name, Value: !Sub '${ProjectName}-private-rt' }
+
+  PrivateRtAssoc1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateRtAssoc2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRouteTable
+
+  # ---------------- NAT Gateway (optional) ----------------
+  NatEip:
+    Type: AWS::EC2::EIP
+    Condition: CreateNat
+    DependsOn: AttachIGW
+    Properties:
+      Domain: vpc
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Condition: CreateNat
+    Properties:
+      AllocationId: !GetAtt NatEip.AllocationId
+      SubnetId: !Ref PublicSubnet1
+      Tags:
+        - { Key: Name, Value: !Sub '${ProjectName}-nat' }
+
+  PrivateNatRoute:
+    Type: AWS::EC2::Route
+    Condition: CreateNat
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+  # ---------------- S3 Gateway Endpoint (free) ----------------
+  S3Endpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref VPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.s3'
+      VpcEndpointType: Gateway
+      RouteTableIds:
+        - !Ref PublicRouteTable
+        - !Ref PrivateRouteTable
+
+  # ---------------- Security Groups ----------------
+  WebSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow HTTP from anywhere
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 80, ToPort: 80, CidrIp: 0.0.0.0/0 }
+      Tags:
+        - { Key: Name, Value: !Sub '${ProjectName}-web-sg' }
+
+  PrivateSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow traffic only from web tier
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - { IpProtocol: tcp, FromPort: 3306, ToPort: 3306, SourceSecurityGroupId: !Ref WebSecurityGroup }
+        - { IpProtocol: icmp, FromPort: -1, ToPort: -1, SourceSecurityGroupId: !Ref WebSecurityGroup }
+      Tags:
+        - { Key: Name, Value: !Sub '${ProjectName}-private-sg' }
+
+  # ---------------- IAM (Session Manager, no SSH keys needed) ----------------
+  InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal: { Service: ec2.amazonaws.com }
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref InstanceRole]
+
+  # ---------------- EC2 ----------------
+  WebServer:
+    Type: AWS::EC2::Instance
+    DependsOn: PublicRoute
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref InstanceType
+      SubnetId: !Ref PublicSubnet1
+      SecurityGroupIds: [!Ref WebSecurityGroup]
+      IamInstanceProfile: !Ref InstanceProfile
+      Tags:
+        - { Key: Name, Value: !Sub '${ProjectName}-web-server' }
+      UserData:
+        Fn::Base64: |
+          #!/bin/bash
+          dnf install -y httpd
+          systemctl enable --now httpd
+          TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 300")
+          IID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
+          AZ=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/availability-zone)
+          cat > /var/www/html/index.html <<EOF
+          <!DOCTYPE html>
+          <html lang="en"><head><meta charset="UTF-8">
+          <meta name="viewport" content="width=device-width, initial-scale=1">
+          <title>AWS VPC Project</title>
+          <style>
+            body{font-family:Arial,sans-serif;background:#0f172a;color:#e2e8f0;margin:0;padding:40px;text-align:center}
+            .card{max-width:760px;margin:auto;background:#1e293b;border-radius:12px;padding:30px;box-shadow:0 4px 20px #0006}
+            h1{color:#38bdf8} code{background:#0f172a;padding:2px 8px;border-radius:4px;color:#fbbf24}
+            li{text-align:left;margin:6px 0}
+          </style></head><body><div class="card">
+          <h1>Custom AWS VPC Project</h1>
+          <p>This page is served from an EC2 instance in a <b>public subnet</b> of a custom VPC.</p>
+          <p>Instance: <code>$IID</code> | AZ: <code>$AZ</code></p>
+          <ul>
+            <li>VPC CIDR 10.0.0.0/16 across 2 Availability Zones</li>
+            <li>2 public + 2 private subnets</li>
+            <li>Internet Gateway, route tables, optional NAT Gateway</li>
+            <li>Security groups (web tier / private tier), S3 gateway endpoint</li>
+          </ul></div></body></html>
+          EOF
+
+  PrivateServer:
+    Type: AWS::EC2::Instance
+    Condition: CreateNat
+    DependsOn: PrivateNatRoute
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref InstanceType
+      SubnetId: !Ref PrivateSubnet1
+      SecurityGroupIds: [!Ref PrivateSecurityGroup]
+      IamInstanceProfile: !Ref InstanceProfile
+      Tags:
+        - { Key: Name, Value: !Sub '${ProjectName}-private-server' }
+
+Outputs:
+  WebsiteURL:
+    Description: LIVE LINK - open this in a browser (wait ~2 minutes after stack completes)
+    Value: !Sub 'http://${WebServer.PublicDnsName}'
+  VpcId:
+    Value: !Ref VPC
+  PublicSubnets:
+    Value: !Sub '${PublicSubnet1}, ${PublicSubnet2}'
+  PrivateSubnets:
+    Value: !Sub '${PrivateSubnet1}, ${PrivateSubnet2}'
